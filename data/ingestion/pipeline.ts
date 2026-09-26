@@ -1,0 +1,111 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
+import type { Store } from '../storage/database.js';
+import { saveObject, deleteObject } from '../storage/objects.js';
+import { extract } from './extract.js';
+import { chunkText, normalize, repairMojibake, sanitizeUntrustedText } from '../processing/text.js';
+import { KnowledgeWorker } from '../../core/knowledge/worker.js';
+import { config, embeddingsEnabled } from '../../gateway/config.js';
+import type { DocumentRecord } from '../../core/types.js';
+import { MAX_UPLOAD_BYTES } from '../../core/ingestion-limits.js';
+export const stageNames = ['Upload', 'Extração', 'Qualidade', 'Normalização', 'Enriquecimento', 'Indexação', 'Validação', 'Disponível'];
+export function contentFingerprint(text: string) {
+  const meaningful = text.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').replace(/\s+/g, ' ').trim();
+  return createHash('sha256').update(meaningful.normalize('NFKC').toLocaleLowerCase('pt-BR')).digest('hex');
+}
+export class Ingestion {
+  private tail = Promise.resolve();
+  private pending = 0;
+  private pendingBytes = 0;
+  readonly knowledge: KnowledgeWorker;
+  constructor(private store: Store) { this.knowledge = new KnowledgeWorker(store); }
+  async enqueue(name: string, content: Buffer, domain: string, owner: string, source?: { sourceUrl: string; capturedAt: string; webLinks: string[] }) {
+    if (content.length > MAX_UPLOAD_BYTES) throw new Error('O limite por arquivo é 50 MB.');
+    if (this.pending >= 30 || this.pendingBytes + content.length > 200 * 1024 * 1024) throw new Error('Fila cheia. Aguarde a conclusão dos documentos.');
+    const hash = createHash('sha256').update(source?.sourceUrl ?? '').update(content).digest('hex');
+    const prior = (await this.store.documents(domain)).find(d => d.hash === hash);
+    if (prior) return { document: prior, duplicate: true };
+    const document: DocumentRecord = {
+      id: randomUUID(), name: repairMojibake(basename(name.replace(/\\/g, '/'))).slice(0, 180), domain, owner, hash,
+      status: 'processing', createdAt: new Date().toISOString(), size: content.length, chunks: 0, stages: [], ...source
+    };
+    await this.store.putDocument(document);
+    await this.store.audit(owner, 'document.upload', document.id);
+    this.pending++; this.pendingBytes += content.length;
+    this.tail = this.tail.then(() => this.process(document, content)).catch(() => undefined).finally(() => { this.pending--; this.pendingBytes -= content.length; });
+    return { document, duplicate: false };
+  }
+  async flushDocuments() { await this.tail; }
+  async idle() { await this.tail; await this.knowledge.close(); }
+  async resumeEmbeddings(domain?: string) {
+    const count = await this.knowledge.seed(domain, Boolean(domain));
+    this.knowledge.start();
+    return count;
+  }
+  private async process(d: DocumentRecord, content: Buffer) {
+    let stage = 'Upload';
+    const complete = async (name: string, detail: string) => {
+      d.stages.push({ name, status: 'done', detail, at: new Date().toISOString() });
+      await this.store.putDocument(d);
+    };
+    try {
+      d.objectKey = await saveObject(d.id, content);
+      await complete(stage, 'Arquivo recebido e armazenado.');
+      stage = 'Extração';
+      let text = (await extract(d.name, content)).text;
+      const meaningfulText = text.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').replace(/\s+/g, ' ').trim();
+      if (!meaningfulText) throw new Error('Sem texto extraível. Este PDF parece digitalizado e precisa de OCR antes de ser consultado.');
+      const contentHash = contentFingerprint(text);
+      const duplicate = (await this.store.documents(d.domain)).find(item => item.id !== d.id && item.contentHash === contentHash && item.status === 'ready');
+      if (duplicate) {
+        if (d.objectKey) await deleteObject(d.objectKey);
+        await this.store.deleteDocument(d.id, d.domain);
+        await this.store.audit(d.owner, 'document.duplicate-content', duplicate.id);
+        return;
+      }
+      d.contentHash = contentHash;
+      await complete(stage, 'Texto extraído do arquivo.');
+      stage = 'Qualidade';
+      if (meaningfulText.length < 20) throw new Error('Texto insuficiente: mínimo de 20 caracteres úteis.');
+      if (text.length > config.MAX_DOCUMENT_CHARS) throw new Error('Texto excede o limite de ' + config.MAX_DOCUMENT_CHARS.toLocaleString('pt-BR') + ' caracteres.');
+      await complete(stage, 'Limites de tamanho e presença de texto verificados.');
+      stage = 'Normalização'; text = sanitizeUntrustedText(normalize(text));
+      await complete(stage, 'Espaços, quebras de linha e Unicode normalizados.');
+      stage = 'Enriquecimento';
+      const pieces = chunkText(text).map(piece => {
+        const page = Number(piece.match(/\[\[LUMINA_PAGE:(\d+)\]\]/)?.[1]);
+        return { text: piece.replace(/\[\[LUMINA_PAGE:\d+\]\]\n?/g, '').trim(), page: Number.isInteger(page) && page > 0 ? page : undefined };
+      });
+      if (pieces.length > config.MAX_DOCUMENT_CHUNKS) throw new Error('Documento excede ' + config.MAX_DOCUMENT_CHUNKS.toLocaleString('pt-BR') + ' trechos.');
+      await complete(stage, 'Metadados de domínio, hash, origem e ' + pieces.length + ' trechos.');
+      stage = 'Indexação';
+      // Chunks are inserted immediately without waiting for embeddings, so the document
+      // stays fast to publish; semantic vectors are filled in afterwards in the background.
+      for (let i = 0; i < pieces.length; i++) {
+        await this.store.addChunk({ id: d.id + ':' + i, documentId: d.id, domain: d.domain, title: d.name, index: i, text: pieces[i].text, page: pieces[i].page, sourceUrl: d.sourceUrl, capturedAt: d.capturedAt });
+      }
+      d.chunks = pieces.length;
+      await complete(stage, embeddingsEnabled() ? 'Índice lexical disponível. Embeddings semânticos serão calculados em segundo plano.' : 'Índice lexical disponível. Embeddings não configurados.');
+      stage = 'Validação';
+      await complete(stage, 'Integridade dos trechos e metadados verificada.');
+      stage = 'Disponível'; d.status = 'ready';
+      await complete(stage, 'Documento liberado para consultas neste domínio.');
+      await this.store.bump(d.domain);
+      await this.store.audit(d.owner, 'document.ready', d.id);
+      this.knowledge.start();
+    } catch (error) {
+      d.status = 'failed'; d.error = error instanceof Error ? error.message : 'Falha no processamento.';
+      d.stages.push({ name: stage, status: 'failed', detail: d.error, at: new Date().toISOString() });
+      await this.store.putDocument(d);
+      await this.store.audit(d.owner, 'document.failed', d.id);
+    }
+  }
+  async remove(id: string, domain: string, actor: string) {
+    const document = await this.store.document(id);
+    if (!document || document.domain !== domain) throw new Error('Documento não encontrado.');
+    if (document.status === 'processing') throw new Error('Aguarde o processamento para excluir.');
+    if (document.objectKey) await deleteObject(document.objectKey);
+    await this.store.deleteDocument(id, domain);
+    await this.store.audit(actor, 'document.delete', id);
+  }
+}
