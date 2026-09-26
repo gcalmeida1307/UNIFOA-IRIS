@@ -1,6 +1,10 @@
-# IRIS
+# LUMINA
 
-IRIS parte do código do [LUMINA](https://github.com/gcalmeida1307/mcp-lumina) para preservar o fluxo de planejar, recuperar, responder e revisar. O [SOFIA](https://github.com/gcalmeida1307/mpc-sofia-unifoa) é a referência para migrar acervo e integrações por domínio. Esta é uma **primeira etapa executável**, não a fusão integral dos dois sistemas.
+Este é o [projeto final LUMINA](https://github.com/gcalmeida1307/UNIFOA-LUMINA), construído a partir do [LUMINA anterior](https://github.com/gcalmeida1307/mcp-lumina) e de capacidades selecionadas do [SOFIA](https://github.com/gcalmeida1307/mpc-sofia-unifoa). O banco PostgreSQL existente continua com o nome interno `iris`: renomeá-lo não é necessário para mudar a identidade do aplicativo e poderia interromper o acesso às contas já migradas.
+
+## Endereço local
+
+A instalação validada está em `C:\Users\glauco.almeida\Documents\UNIFOA-IRIS`, com acesso em **http://127.0.0.1:8081**. Para iniciar novamente, execute `start.ps1` nessa pasta; não abra uma segunda instância se o servidor já estiver ativo. A porta 8080 estava ocupada e foi preservada. Não é necessário editar o arquivo hosts. Este endereço funciona apenas neste computador. Consulte [a entrega e os testes](docs/ENTREGA-LOCAL.md).
 
 ## O que já funciona nesta base
 
@@ -17,7 +21,33 @@ Requer Node.js 24 ou superior. Copie `.env.example` para `.env`, configure o mod
 
 Para criar contas no PostgreSQL do IRIS, configure `AUTH_MODE=native`, `LUMINA_ENCRYPTION_KEY` com 32 bytes hexadecimais, `IRIS_ADMIN_EMAIL` e `IRIS_ADMIN_FIRST_PASSWORD` forte no `.env`. Na primeira inicialização, a conta AG000001 é criada com troca obrigatória de senha e 2FA. Depois do primeiro acesso, remova a senha inicial do arquivo `.env` e reinicie; o administrador existente não é recriado. Solicitações precisam ser aprovadas pela AG000001, que entrega a matrícula e o token de ativação por um canal seguro. A chave de cifragem deve permanecer estável para permitir a leitura dos dados já gravados.
 
+## Contas existentes do LUMINA
+
+Se o LUMINA usa `AUTH_MODE=native` e PostgreSQL, as contas podem ser migradas para o banco exclusivo do IRIS preservando os hashes das senhas. A rotina recriptografa nome, e-mail e segredo 2FA com a chave do IRIS, recalcula o índice de e-mail e mantém código, permissões e estado da conta. Não copia sessões, tokens de recuperação nem documentos; ninguém precisa informar senhas de usuários. Ela nunca altera o banco do LUMINA.
+
+Deixe a instalação do IRIS parada durante a importação. Guarde um backup do banco `iris` e configure no `.env` do IRIS `DATABASE_URL`, `AUTH_MODE=native` e `LUMINA_ENCRYPTION_KEY` (a chave do IRIS, que deve continuar estável). No PowerShell da pasta IRIS, execute primeiro a prévia, apontando para o `.env` **local** do LUMINA:
+
+```powershell
+npm run import:lumina-users -- "--lumina-env=C:\caminho\do\LUMINA\.env" --dry-run
+```
+
+Se ela informar contas compatíveis e ausência de conflitos, importe com `--apply` no lugar de `--dry-run`. O programa lê as credenciais e as chaves exclusivamente desses arquivos locais, não as imprime e não os altera. Não envie os `.env`, hashes ou resultados com identificadores pessoais. Caso já exista no IRIS uma conta com o mesmo código ou e-mail, a importação para antes de gravar; resolva o conflito com uma decisão explícita. Se a conta `AG000001` não existir na origem, a primeira inicialização em `native` ainda exigirá `IRIS_ADMIN_EMAIL` e `IRIS_ADMIN_FIRST_PASSWORD` para criá-la. Após importar, inicie o IRIS e verifique o acesso de uma conta de teste com a senha e o 2FA atuais do LUMINA; as sessões antigas precisarão de novo login. A migração cria contas independentes: mudanças futuras de senha ou permissões em um sistema não sincronizam automaticamente com o outro.
+
 ## Integração do SOFIA
+
+### Migrar os documentos do LUMINA
+
+O LUMINA armazena registros em `documents`, trechos para RAG em `chunks` e originais em `DATA_DIR/objects` ou no bucket S3 configurado. A rotina abaixo copia os três componentes para o IRIS sem alterar a origem. Ela preserva módulo, dono, identificadores, página, texto, vetores e origem da fonte. Documentos com estado `failed` ou `processing` são contados na prévia e ignorados; não podem ser consultados no LUMINA. Conversas, memórias, contas e índices de relações não são documentos e não são copiados por esta rotina.
+
+Pare os dois servidores, faça backup do banco `iris` e dos arquivos originais do IRIS, e execute na pasta `UNIFOA-IRIS`:
+
+```powershell
+npm run import:lumina-documents -- "--lumina-env=C:\caminho\do\LUMINA\.env" --dry-run
+```
+
+Use o caminho real do `.env` do LUMINA. Se a prévia confirmar que todos os arquivos e trechos consultáveis estão disponíveis e não há conflitos, repita com `--apply`. O script lê as configurações locais dos dois projetos sem imprimi-las. Um arquivo equivalente (mesmo módulo, hash do conteúdo e da origem, contagem de trechos e arquivo original presente) com ID diferente é contado como já existente, sem ser duplicado. Arquivos com o mesmo ID e conteúdo diferente, ou com trechos/arquivo de destino incompletos, continuam bloqueando a migração. O script interrompe a prévia caso um arquivo esteja ausente ou haja conflito; não substitua arquivos ou registros manualmente. Após a cópia, o LUMINA pode reconstruir em segundo plano relações e embeddings quando estiver configurado com um modelo diferente. Teste uma consulta em cada módulo e a leitura de uma planilha original. Mantenha estáveis os caminhos `DATA_DIR` e o bucket de destino; o banco sozinho não contém os arquivos originais.
+
+Para manter os documentos que já constam no destino e copiar somente os que não apresentam colisão de ID/hash, acrescente `--skip-existing` depois de `--dry-run` na prévia e depois de `--apply` na execução. A prévia informa quantos documentos da origem serão ignorados por conflito. Essa opção não corrige registros incompletos no destino; confira se os arquivos existentes podem ser abertos e consultados. A ausência de arquivo original na origem, trechos incompletos na origem ou colisão de arquivo sem registro correspondente continuam bloqueando a execução. Faça backup antes de usar `--apply`.
 
 Veja [docs/migracao-sofia.md](docs/migracao-sofia.md). Nenhum documento do SOFIA foi copiado automaticamente. A importação precisa respeitar autorização, versão e tamanho dos arquivos; a aplicação e o índice não devem publicar dados institucionais só porque um repositório de origem é público.
 

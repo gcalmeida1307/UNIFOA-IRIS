@@ -28,6 +28,7 @@ export function refersToPrevious(question: string): boolean {
   const text = question.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
   if (/\b(mudando de assunto|outro assunto|agora sobre)\b/.test(text)) return false;
   return /\b(isso|disso|nisso|deles|delas|dele|dela|esse|essa|esses|essas|desse|dessa|desses|dessas|nesse|nessa|anterior|acima)\b/.test(text)
+    || /^e\s+(quando|como|por que|qual|quais|quanto|quantos|quantas)\b/.test(text.trim())
     || /^(e\s+)?(qual (e )?o prazo|por que|como assim|explique melhor|continue|resuma|pode explicar melhor)\s*[?!.]*$/.test(text.trim());
 }
 

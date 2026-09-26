@@ -9,10 +9,10 @@ export async function api<T = any>(path: string, init?: RequestInit): Promise<T>
   }
   return response.status === 204 ? undefined as T : response.json();
 }
-export async function ask(question: string, domain: string, agent: boolean, history: ConversationTurn[], conversationId: string, onStep: (s: TraceStep) => void, signal?: AbortSignal): Promise<Run> {
+export async function ask(question: string, domain: string, agent: boolean, history: ConversationTurn[], conversationId: string, onStep: (s: TraceStep) => void, signal?: AbortSignal, documentIds?: string[]): Promise<Run> {
   const response = await fetch('/api/chat', {
     method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...await authHeaders() },
-    body: JSON.stringify({ question, domain, agent, history, conversationId }), signal
+    body: JSON.stringify({ question, domain, agent, history, conversationId, ...(documentIds?.length ? { documentIds } : {}) }), signal
   });
   if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.error ?? 'Erro ao consultar.'); }
   const reader = response.body?.getReader();

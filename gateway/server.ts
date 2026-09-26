@@ -19,7 +19,7 @@ await initObjects(); await initCache();
 const { app, ingestion, webImports, researchJobs } = createApp(store);
 void ingestion.resumeEmbeddings().catch(() => console.warn('Não foi possível retomar a indexação vetorial. A busca textual continua disponível.'));
 const server = app.listen(config.PORT, config.HOST, () => {
-  console.log('IRIS disponível em http://' + config.HOST + ':' + config.PORT);
+  console.log('LUMINA disponível em http://' + config.HOST + ':' + config.PORT);
   console.log(config.AUTH_MODE === 'local' ? 'Modo local de desenvolvimento, sem autenticação. Não exponha à rede.' : 'Autenticação ' + config.AUTH_MODE + ' ativa · ' + store.storageName);
 });
 let closing = false;

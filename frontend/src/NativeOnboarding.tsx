@@ -51,7 +51,7 @@ export function NativeOnboarding() {
   }
   const switchMode = (next: Mode) => { setMode(next); setError(''); setMessage(''); setArtifact(undefined); setPassword(''); setConfirmation(''); };
   return <main className="login-screen"><section className="login-panel"><div className="login-mark"><img src="/lumina.svg" alt="" /></div>
-    <h1>{({ login: 'Entre no IRIS', request: 'Solicite acesso', activate: 'Ative sua conta', reset: 'Redefina sua senha' })[mode]}</h1>
+    <h1>{({ login: 'Entre no LUMINA', request: 'Solicite acesso', activate: 'Ative sua conta', reset: 'Redefina sua senha' })[mode]}</h1>
     <p>{error || message || ({ login: 'Use sua matrícula ou e-mail, senha e código do autenticador.', request: 'A conta administradora aprova o módulo solicitado.', activate: 'Use matrícula e token recebidos da administração.', reset: 'Use o token de recuperação fornecido pela administração.' })[mode]}</p>
     <form onSubmit={event => void submit(event)}>
       {mode === 'login' && <><label>Matrícula ou e-mail<input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" required /></label><label>Senha<input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" required /></label><label>Código 2FA<input value={otp} onChange={event => setOtp(event.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" /></label></>}
