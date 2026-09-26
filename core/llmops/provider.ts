@@ -1,4 +1,5 @@
 import { config, embeddingsEnabled, generationEnabled } from '../../gateway/config.js';
+import { ExternalRedaction } from '../../security/privacy.js';
 export type Message = { role: 'system' | 'user'; content: string };
 async function request(path: string, body: unknown, baseUrl = config.LLM_BASE_URL, apiKey = config.LLM_API_KEY, timeoutMs = 60000, signal?: AbortSignal) {
   const response = await fetch(baseUrl.replace(/\/$/, '') + path, {
@@ -21,6 +22,8 @@ async function anthropicRequest(messages: Message[], maxTokens: number, model = 
 }
 export async function generate(messages: Message[], maxTokens = 3000, model = config.LLM_MODEL) {
   if (!generationEnabled()) throw new Error('Modelo de geração não configurado.');
+  const privacy = config.LLM_PROVIDER === 'ollama' ? undefined : new ExternalRedaction();
+  messages = privacy ? messages.map(message => ({ ...message, content: privacy.clean(message.content) })) : messages;
   const result = config.LLM_PROVIDER === 'anthropic' ? await anthropicRequest(messages, maxTokens, model) : await request('/chat/completions', {
     model, messages, temperature: 0,
     response_format: { type: 'json_object' }, max_tokens: maxTokens
@@ -29,7 +32,7 @@ export async function generate(messages: Message[], maxTokens = 3000, model = co
   if (typeof content !== 'string') throw new Error('Resposta vazia do provedor.');
   let data: unknown;
   try { data = JSON.parse(content); } catch { throw new Error('O modelo não retornou JSON válido.'); }
-  return { data, inputTokens: Number(result.usage?.input_tokens ?? result.usage?.prompt_tokens ?? 0), outputTokens: Number(result.usage?.output_tokens ?? result.usage?.completion_tokens ?? 0) };
+  return { data: privacy ? privacy.restore(data) : data, inputTokens: Number(result.usage?.input_tokens ?? result.usage?.prompt_tokens ?? 0), outputTokens: Number(result.usage?.output_tokens ?? result.usage?.completion_tokens ?? 0) };
 }
 export async function embed(texts: string[], options: { attempts?: number; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<number[][]> {
   if (!embeddingsEnabled()) return [];

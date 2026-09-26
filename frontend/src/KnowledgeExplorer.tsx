@@ -102,7 +102,7 @@ export function NeuralExplorer({ data, error, onRetry, iconMap, onOpen, canReind
     };
     if (!location.domain) {
       const items = (data?.domains ?? []).filter(item => normalize(item.name).includes(normalize(query)));
-      center({ label: 'IRIS CORE', subtitle: `${items.length} módulos de conhecimento`, caption: 'REDE INSTITUCIONAL', color: '#ad81ff', kind: 'core', icon: BrainCircuit, refId: '' });
+      center({ label: 'LUMINA CORE', subtitle: `${items.length} módulos de conhecimento`, caption: 'REDE INSTITUCIONAL', color: '#ad81ff', kind: 'core', icon: BrainCircuit, refId: '' });
       items.forEach((item, i) => {
         orbit(item.id, i, items.length, { label: item.name, subtitle: `${count(item.documents)} documentos · ${count(item.chunks)} trechos`, caption: 'MÓDULO', color: item.color, kind: 'domain', icon: iconMap[item.icon] ?? Boxes, refId: item.id });
       });

@@ -1,7 +1,4 @@
 import { extname } from 'node:path';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -10,8 +7,9 @@ import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
 import { PDFParse } from 'pdf-parse';
 import { repairMojibake } from '../processing/text.js';
+import { ocrImage, ocrSettings } from './ocr.js';
 const run = promisify(execFile);
-export const extensions = ['.txt', '.md', '.csv', '.json', '.pdf', '.docx', '.xlsx'];
+export const extensions = ['.txt', '.md', '.csv', '.json', '.pdf', '.docx', '.xlsx', '.xml', '.yaml', '.yml', '.log', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'];
 export type ExtractedDocument = { text: string; pages?: Array<{ page: number; text: string }> };
 function hasMeaningfulPdfText(text: string) {
   return text.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').replace(/\s+/g, ' ').trim().length >= 20;
@@ -20,19 +18,14 @@ async function extractPdfWithOcr(buffer: Buffer) {
   const directory = await mkdtemp(tmpdir() + '/lumina-ocr-');
   const input = directory + '/input.pdf';
   const prefix = directory + '/page';
-  const pdftoppm = process.env.LUMINA_PDFTOPPM_PATH || (process.platform === 'win32' ? 'pdftoppm.exe' : 'pdftoppm');
-  const tesseract = process.env.LUMINA_TESSERACT_PATH || (process.platform === 'win32' ? 'tesseract.exe' : 'tesseract');
-  const bundledTessdata = resolve(dirname(fileURLToPath(import.meta.url)), '../../');
-  const tessdata = process.env.IRIS_TESSDATA_DIR || (existsSync(resolve(bundledTessdata, 'por.traineddata')) ? bundledTessdata : undefined);
   try {
     await writeFile(input, buffer);
-    await run(pdftoppm, ['-r', '180', '-png', input, prefix], { windowsHide: true, maxBuffer: 1024 * 1024 });
-    const files = (await readdir(directory)).filter(name => name.endsWith('.png')).sort();
+    await run(ocrSettings().pdftoppm, ['-r', '180', '-png', input, prefix], { windowsHide: true, timeout: 180000, maxBuffer: 1024 * 1024 });
+    const files = (await readdir(directory)).filter(name => name.endsWith('.png')).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     if (!files.length) throw new Error('O renderizador PDF não produziu páginas para OCR.');
     const pages: string[] = [];
     for (const file of files) {
-      const result = await run(tesseract, [directory + '/' + file, 'stdout', '-l', 'por', ...(tessdata ? ['--tessdata-dir', tessdata] : [])], { windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
-      pages.push(result.stdout);
+      pages.push(await ocrImage(directory + '/' + file));
     }
     return { text: pages.map((text, index) => `\n\n[[LUMINA_PAGE:${index + 1}]]\n${text}`).join('\n'), pages: pages.map((text, index) => ({ page: index + 1, text })) };
   } catch (error) {
@@ -45,6 +38,11 @@ async function extractPdfWithOcr(buffer: Buffer) {
 export async function extract(name: string, buffer: Buffer): Promise<ExtractedDocument> {
   const ext = extname(name).toLowerCase();
   if (!extensions.includes(ext)) throw new Error('Formato não suportado. Use TXT, MD, CSV, JSON, PDF, DOCX ou XLSX.');
+  if (['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'].includes(ext)) {
+    const directory = await mkdtemp(tmpdir() + '/iris-image-');
+    try { const input = directory + '/input' + ext; await writeFile(input, buffer); const text = await ocrImage(input); return { text, pages: [{ page: 1, text }] }; }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  }
   if (ext === '.pdf') {
     if (!buffer.subarray(0, 5).equals(Buffer.from('%PDF-'))) throw new Error('Conteúdo PDF inválido.');
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
@@ -58,7 +56,7 @@ export async function extract(name: string, buffer: Buffer): Promise<ExtractedDo
     return extractPdfWithOcr(buffer);
   }
   if (ext === '.docx' || ext === '.xlsx') {
-    if (buffer.readUInt32LE(0) !== 0x04034b50) throw new Error('Arquivo Office inválido.');
+    if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50) throw new Error('Arquivo Office inválido.');
     // Reject containers declaring excessive expanded sizes before handing to parsers.
     let expanded = 0, entries = 0;
     for (let i = 0; i < buffer.length - 46; i++) {

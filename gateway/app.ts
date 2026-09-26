@@ -106,7 +106,7 @@ export function createApp(store: Store) {
   app.get('/api/status', async (req, res) => {
     const docs = (await store.documents()).filter(d => canRead(req.principal, d.domain));
     res.json({
-      name: 'IRIS', version: '0.1.0', authMode: config.AUTH_MODE,
+      name: 'LUMINA', version: '0.1.0', authMode: config.AUTH_MODE,
       generation: generationEnabled(), embeddings: embeddingsEnabled(),
       model: generationEnabled() ? config.LLM_MODEL : null,
       provider: config.LLM_PROVIDER,

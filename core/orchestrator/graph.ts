@@ -15,6 +15,7 @@ import { evaluateRun } from '../llmops/evaluation.js';
 import { answerGroundedness, answerReviews } from '../../observability/telemetry.js';
 import { analyzeStructured, isStructuredQuestion } from '../structured/analysis.js';
 import { requestsExtendedWriting, writeExtended } from './longform.js';
+import { domainPolicy } from '../../services/domain-policy.js';
 const needsStructuredAnalysis = (question: string) => /\b(compare|comparar|comparação|confront|relação|relacione|cruz|cruze|diferen[çc]a|diverg|converg|s[íi]ntese|resum|explique|detalh|risco|causa|consequ[êe]ncia|impacto|pontos? (em comum|distint)|entre .*document)/iu.test(question);
 const comparisonRequested = (question: string) => /\b(compare|comparar|comparação|confront|relação entre|relacione|cruz|cruze|diferen[çc]a|diverg|converg|pontos? (em comum|distint)|entre .*document)/iu.test(question);
 const State = Annotation.Root({
@@ -38,23 +39,25 @@ export async function orchestrate(store: Store, principal: Principal, question: 
     return run;
   }
   const normalizedQuestion = canonicalizeConfusables(sanitizeUntrustedText(question));
+  const contextualQuery = contextualizeQuestion(normalizedQuestion, history);
+  const conversationContext = conversationPrompt(history, normalizedQuestion);
   if (documentIds?.length) {
     const available = new Set((await store.documents(domain)).filter(doc => doc.status === 'ready').map(doc => doc.id));
     if (documentIds.some(id => !available.has(id))) throw new Error('Documento selecionado indisponível neste domínio.');
   }
   if (isStructuredQuestion(normalizedQuestion)) {
-    const outcome = await analyzeStructured(normalizedQuestion, (await store.documents(domain)).filter(doc => !documentIds || documentIds.includes(doc.id)));
+    const outcome = await analyzeStructured(contextualQuery, (await store.documents(domain)).filter(doc => !documentIds || documentIds.includes(doc.id)));
     step('Analisar planilha', outcome.detail);
     const run: Run = {
       id: runId, owner: principal.id, domain, conversationId, question, createdAt: new Date().toISOString(),
       answer: outcome.answer, sources: outcome.document ? [{ id: outcome.document.id, documentId: outcome.document.id, title: outcome.document.name, text: outcome.detail, chunk: 1, score: 1 }] : [],
-      steps, mode: 'extractive', status: outcome.document && !/ambígu|ausente/i.test(outcome.detail) ? 'completed' : 'abstained', durationMs: Date.now() - start, inputTokens: 0, outputTokens: 0, workflow: 'structured-analysis-v1'
+      steps, mode: 'extractive', status: outcome.verified ? 'completed' : 'abstained', durationMs: Date.now() - start, inputTokens: 0, outputTokens: 0, workflow: 'structured-analysis-v1'
     };
     await store.saveRun(run); await store.audit(principal.id, 'query.' + run.status, run.id);
     return run;
   }
-  if (llm && requestsExtendedWriting(normalizedQuestion)) {
-    const result = await writeExtended(store, normalizedQuestion, domain, runId, documentIds);
+  if (llm && requestsExtendedWriting(normalizedQuestion) && !comparisonRequested(normalizedQuestion)) {
+    const result = await writeExtended(store, contextualQuery, domain, runId, documentIds);
     step('Sintetizar', `Examinados ${result.examined}/${result.total} trechos de ${result.documents}/${result.totalDocuments} documentos. Seções validadas: ${result.reviews.filter(review => review.verdict === 'pass').length}.`);
     const completed = result.reviews.some(review => review.verdict === 'pass');
     const run: Run = {
@@ -67,15 +70,13 @@ export async function orchestrate(store: Store, principal: Principal, question: 
     return run;
   }
   const correction = isAnswerCorrection(normalizedQuestion);
-  const contextualQuery = contextualizeQuestion(normalizedQuestion, history);
-  const conversationContext = conversationPrompt(history, normalizedQuestion);
   const documentNames = typeof store.documents === 'function' ? (await store.documents(domain)).map(document => document.name) : [];
   const researchMemory = typeof store.memories === 'function' ? await store.memories(principal.id, domain) : [];
   const memoryContext = relevantMemories(contextualQuery, researchMemory).map(memory => `Pergunta: ${memory.question}\nResposta anterior: ${memory.answer}`);
   const workflow = new StateGraph(State)
     .addNode('plan', async () => {
       const structured = agent || needsStructuredAnalysis(normalizedQuestion);
-      const p = await plan(contextualQuery, structured, documentNames, memoryContext);
+      const p = await plan(contextualQuery, structured || llm, documentNames, memoryContext);
       const queries = [...new Set([contextualQuery, ...p.queries])].slice(0, 5);
       step('Planejar', structured ? queries.length + ' consulta(s); análise estruturada restrita à base autorizada. ' + JSON.stringify(queries) : 'Consulta documental direta.');
       return { queries, comparison: comparisonRequested(normalizedQuestion), inputTokens: p.inputTokens, outputTokens: p.outputTokens, attempts: 0 };
@@ -97,7 +98,7 @@ export async function orchestrate(store: Store, principal: Principal, question: 
         return { answer: 'Encontrei estes trechos na base de conhecimento. A síntese por IA ficará disponível após configurar o provedor.\n\n' + state.sources.slice(0, 3).map((s, i) => '[' + (i + 1) + '] ' + s.text).join('\n\n'), citations: state.sources.slice(0, 3).map((_, i) => i + 1), findings: [], abstain: false, accepted: true };
       }
       const result = await generate([
-        { role: 'system', content: answerInstructions },
+        { role: 'system', content: answerInstructions + '\n' + domainPolicy(domain) },
         { role: 'user', content: JSON.stringify({ question: contextualQuery, userMessage: normalizedQuestion, feedbackMode: correction, conversation: conversationContext, researchMemory: memoryContext, sources: state.sources.map((s, i) => ({ citation: i + 1, documentId: s.documentId, document: s.title, passage: s.chunk, page: s.page, text: s.text })), retry: state.attempts > 0 ? 'A resposta anterior falhou na verificação de evidências. Use apenas afirmações diretamente sustentadas.' : undefined }) }
       ], config.IRIS_RESPONSE_MAX_TOKENS);
       const parsed = answerSchema.safeParse(result.data);

@@ -8,8 +8,8 @@ import type { Run } from '../core/types.js';
 
 test('an older conversation survives a busy history and stays scoped to its owner', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'iris-history-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new Store('', directory);
+  t.after(async () => { await store.close(); rmSync(directory, { recursive: true, force: true }); });
   await store.init();
   const olderId = crypto.randomUUID();
   const run = (index: number, owner: string, conversationId: string): Run => ({

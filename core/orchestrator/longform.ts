@@ -9,7 +9,8 @@ import { config } from '../../gateway/config.js';
 
 /** Extended writing is opt-in; ordinary factual answers keep the normal LUMINA path. */
 export function requestsExtendedWriting(question: string): boolean {
-  return /\b(resum[aoe]|resumir|s[íi]ntese|reda[çc][aã]o|redigir|artigo|ensaio|relat[óo]rio|tcc|monografia|texto extenso|texto completo)\b/iu.test(question);
+  return /\b(resum[aoe]|resumir|s[íi]ntese|reda[çc][aã]o|redigir|ensaio|relat[óo]rio|tcc|monografia|texto extenso|texto completo)\b/iu.test(question)
+    || /\b(escreva|escrever|produza|elabore|redija|crie)\b.{0,35}\bartigo\b/iu.test(question);
 }
 
 export function sampleChunks<T>(chunks: T[], budget: number): T[] {
