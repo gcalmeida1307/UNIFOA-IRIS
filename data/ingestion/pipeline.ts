@@ -58,7 +58,8 @@ export class Ingestion {
       d.objectKey = await saveObject(d.id, content);
       await complete(stage, 'Arquivo recebido e armazenado.');
       stage = 'Extração';
-      let text = (await extract(d.name, content)).text;
+      const extracted = await extract(d.name, content);
+      let text = extracted.text;
       const meaningfulText = text.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '').replace(/\s+/g, ' ').trim();
       if (!meaningfulText) throw new Error('Sem texto extraível. Este PDF parece digitalizado e precisa de OCR antes de ser consultado.');
       const contentHash = contentFingerprint(text);
@@ -78,10 +79,9 @@ export class Ingestion {
       stage = 'Normalização'; text = sanitizeUntrustedText(normalize(text));
       await complete(stage, 'Espaços, quebras de linha e Unicode normalizados.');
       stage = 'Enriquecimento';
-      const pieces = chunkText(text).map(piece => {
-        const page = Number(piece.match(/\[\[LUMINA_PAGE:(\d+)\]\]/)?.[1]);
-        return { text: piece.replace(/\[\[LUMINA_PAGE:\d+\]\]\n?/g, '').trim(), page: Number.isInteger(page) && page > 0 ? page : undefined };
-      });
+      const pieces = extracted.pages
+        ? extracted.pages.flatMap(page => chunkText(sanitizeUntrustedText(normalize(page.text))).map(piece => ({ text: piece, page: page.page })))
+        : chunkText(text).map(piece => ({ text: piece, page: undefined }));
       if (pieces.length > config.MAX_DOCUMENT_CHUNKS) throw new Error('Documento excede ' + config.MAX_DOCUMENT_CHUNKS.toLocaleString('pt-BR') + ' trechos.');
       await complete(stage, 'Metadados de domínio, hash, origem e ' + pieces.length + ' trechos.');
       stage = 'Indexação';

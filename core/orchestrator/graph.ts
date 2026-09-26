@@ -16,8 +16,8 @@ import { answerGroundedness, answerReviews } from '../../observability/telemetry
 import { analyzeStructured, isStructuredQuestion } from '../structured/analysis.js';
 import { requestsExtendedWriting, writeExtended } from './longform.js';
 import { domainPolicy } from '../../services/domain-policy.js';
+import { comparisonIntent, comparisonSources, comparisonReport, validComparisonFindings } from './comparison.js';
 const needsStructuredAnalysis = (question: string) => /\b(compare|comparar|comparação|confront|relação|relacione|cruz|cruze|diferen[çc]a|diverg|converg|s[íi]ntese|resum|explique|detalh|risco|causa|consequ[êe]ncia|impacto|pontos? (em comum|distint)|entre .*document)/iu.test(question);
-const comparisonRequested = (question: string) => /\b(compare|comparar|comparação|confront|relação entre|relacione|cruz|cruze|diferen[çc]a|diverg|converg|pontos? (em comum|distint)|entre .*document)/iu.test(question);
 const State = Annotation.Root({
   queries: Annotation<string[]>(), sources: Annotation<Evidence[]>(), answer: Annotation<string>(),
   citations: Annotation<number[]>(), accepted: Annotation<boolean>(), attempts: Annotation<number>(),
@@ -41,10 +41,15 @@ export async function orchestrate(store: Store, principal: Principal, question: 
   const normalizedQuestion = canonicalizeConfusables(sanitizeUntrustedText(question));
   const contextualQuery = contextualizeQuestion(normalizedQuestion, history);
   const conversationContext = conversationPrompt(history, normalizedQuestion);
+  const availableDocuments = typeof store.documents === 'function' ? (await store.documents(domain)).filter(doc => doc.status === 'ready') : [];
   if (documentIds?.length) {
-    const available = new Set((await store.documents(domain)).filter(doc => doc.status === 'ready').map(doc => doc.id));
+    const available = new Set(availableDocuments.map(doc => doc.id));
     if (documentIds.some(id => !available.has(id))) throw new Error('Documento selecionado indisponível neste domínio.');
   }
+  const requiredComparisonIds = comparisonSources(normalizedQuestion, availableDocuments, documentIds);
+  // Comparing two concepts inside one document needs no second source. The
+  // two-source gate applies only when documents themselves are contrasted.
+  const comparing = requiredComparisonIds.length >= 2 || comparisonIntent(normalizedQuestion) && /\b(?:dois? documentos?|arquivos?|fontes?|pdfs?)\b/iu.test(normalizedQuestion);
   if (isStructuredQuestion(normalizedQuestion)) {
     const outcome = await analyzeStructured(contextualQuery, (await store.documents(domain)).filter(doc => !documentIds || documentIds.includes(doc.id)));
     step('Analisar planilha', outcome.detail);
@@ -56,7 +61,7 @@ export async function orchestrate(store: Store, principal: Principal, question: 
     await store.saveRun(run); await store.audit(principal.id, 'query.' + run.status, run.id);
     return run;
   }
-  if (llm && requestsExtendedWriting(normalizedQuestion) && !comparisonRequested(normalizedQuestion)) {
+  if (llm && requestsExtendedWriting(normalizedQuestion) && !comparing) {
     const result = await writeExtended(store, contextualQuery, domain, runId, documentIds);
     step('Sintetizar', `Examinados ${result.examined}/${result.total} trechos de ${result.documents}/${result.totalDocuments} documentos. Seções validadas: ${result.reviews.filter(review => review.verdict === 'pass').length}.`);
     const completed = result.reviews.some(review => review.verdict === 'pass');
@@ -70,7 +75,7 @@ export async function orchestrate(store: Store, principal: Principal, question: 
     return run;
   }
   const correction = isAnswerCorrection(normalizedQuestion);
-  const documentNames = typeof store.documents === 'function' ? (await store.documents(domain)).map(document => document.name) : [];
+  const documentNames = availableDocuments.map(document => document.name);
   const researchMemory = typeof store.memories === 'function' ? await store.memories(principal.id, domain) : [];
   const memoryContext = relevantMemories(contextualQuery, researchMemory).map(memory => `Pergunta: ${memory.question}\nResposta anterior: ${memory.answer}`);
   const workflow = new StateGraph(State)
@@ -79,12 +84,22 @@ export async function orchestrate(store: Store, principal: Principal, question: 
       const p = await plan(contextualQuery, structured || llm, documentNames, memoryContext);
       const queries = [...new Set([contextualQuery, ...p.queries])].slice(0, 5);
       step('Planejar', structured ? queries.length + ' consulta(s); análise estruturada restrita à base autorizada. ' + JSON.stringify(queries) : 'Consulta documental direta.');
-      return { queries, comparison: comparisonRequested(normalizedQuestion), inputTokens: p.inputTokens, outputTokens: p.outputTokens, attempts: 0 };
+      return { queries, comparison: comparing, inputTokens: p.inputTokens, outputTokens: p.outputTokens, attempts: 0 };
     })
     .addNode('retrieve', async state => {
       const primary = await retrieve(store, state.queries[0], domain, documentIds);
       const batches = [primary, ...(await Promise.all(state.queries.slice(1).map(query => retrieve(store, query, domain, documentIds))))];
-      const sources = mergeEvidence(batches, 10);
+      let sources = mergeEvidence(batches, 10);
+      // Give each explicitly named/selected source its own retrieval attempt.
+      // Broad ranking over a large corpus can otherwise return just one side.
+      if (state.comparison && requiredComparisonIds.length >= 2) {
+        const scoped = await Promise.all(requiredComparisonIds.slice(0, 5).map(async id => {
+          const results = await Promise.all(state.queries.map(query => retrieve(store, query, domain, [id])));
+          return mergeEvidence(results, 2);
+        }));
+        const priority = scoped.flat();
+        sources = [...new Map([...priority, ...sources].map(item => [item.id, item])).values()].slice(0, 10);
+      }
       step('Recuperar', sources.length + ' trecho(s) de ' + new Set(sources.map(source => source.documentId)).size + ' documento(s) no domínio ' + domain + '. Consultas: ' + state.queries.length + '. Documentos: ' + [...new Set(sources.map(source => source.title))].join(' | '));
       return { sources };
     })
@@ -98,15 +113,18 @@ export async function orchestrate(store: Store, principal: Principal, question: 
         return { answer: 'Encontrei estes trechos na base de conhecimento. A síntese por IA ficará disponível após configurar o provedor.\n\n' + state.sources.slice(0, 3).map((s, i) => '[' + (i + 1) + '] ' + s.text).join('\n\n'), citations: state.sources.slice(0, 3).map((_, i) => i + 1), findings: [], abstain: false, accepted: true };
       }
       const result = await generate([
-        { role: 'system', content: answerInstructions + '\n' + domainPolicy(domain) },
+        { role: 'system', content: answerInstructions + '\n' + domainPolicy(domain) + (state.comparison ? '\nExamine separadamente cada documento citado. Cada confronto exige dois trechos de documentos distintos e uma conclusão condicionada. Preencha findings para cada confronto; se faltar qualquer lado, abstenha-se da conclusão. Cite títulos, páginas quando fornecidas e condições de aplicação, sem inventar números de página. Textos de outros documentos podem contextualizar, mas não substituir as duas fontes do confronto.' : '') },
         { role: 'user', content: JSON.stringify({ question: contextualQuery, userMessage: normalizedQuestion, feedbackMode: correction, conversation: conversationContext, researchMemory: memoryContext, sources: state.sources.map((s, i) => ({ citation: i + 1, documentId: s.documentId, document: s.title, passage: s.chunk, page: s.page, text: s.text })), retry: state.attempts > 0 ? 'A resposta anterior falhou na verificação de evidências. Use apenas afirmações diretamente sustentadas.' : undefined }) }
       ], config.IRIS_RESPONSE_MAX_TOKENS);
       const parsed = answerSchema.safeParse(result.data);
       step('Gerar', 'Resposta estruturada recebida; aguardando verificação.');
-      const answer = parsed.success && parsed.data.citations.length
-        ? formatCitedAnswer(parsed.data.answer, parsed.data.citations)
+      const findings = parsed.success && state.comparison ? validComparisonFindings(parsed.data.findings, state.sources, requiredComparisonIds) : [];
+      const answer = parsed.success && parsed.data.abstain ? 'Não há evidências suficientes dos dois lados para concluir este confronto nos documentos recuperados.'
+        : state.comparison && findings.length ? comparisonReport(findings, state.sources)
+        : parsed.success && parsed.data.citations.length ? formatCitedAnswer(parsed.data.answer, parsed.data.citations)
         : parsed.success ? parsed.data.answer : '';
-      return { answer, citations: parsed.success ? parsed.data.citations : [], findings: parsed.success ? parsed.data.findings : [], abstain: parsed.success ? parsed.data.abstain : false, accepted: false, attempts: state.attempts + 1, inputTokens: state.inputTokens + result.inputTokens, outputTokens: state.outputTokens + result.outputTokens };
+      const citations = state.comparison && findings.length ? [...new Set(findings.flatMap(finding => [finding.leftCitation, finding.rightCitation]))] : parsed.success ? parsed.data.citations : [];
+      return { answer, citations, findings, abstain: parsed.success ? parsed.data.abstain : false, accepted: false, attempts: state.attempts + 1, inputTokens: state.inputTokens + result.inputTokens, outputTokens: state.outputTokens + result.outputTokens };
     })
     .addNode('judge', async state => {
       if (state.accepted || state.abstain) {
@@ -119,8 +137,7 @@ export async function orchestrate(store: Store, principal: Principal, question: 
         return { accepted: false };
       }
       const documentIds = new Set(state.sources.map(source => source.documentId));
-      const completeFindings = state.findings.filter(finding => validCitations([finding.leftCitation, finding.rightCitation], state.sources.length)
-        && state.sources[finding.leftCitation - 1].documentId !== state.sources[finding.rightCitation - 1].documentId);
+      const completeFindings = validComparisonFindings(state.findings, state.sources, requiredComparisonIds);
       if (state.comparison && (documentIds.size < 2 || !completeFindings.length)) {
         step('Verificar', 'Cobertura comparativa insuficiente: ' + documentIds.size + ' documento(s), ' + completeFindings.length + ' confronto(s) verificável(is).');
         return { accepted: false };
@@ -140,7 +157,7 @@ export async function orchestrate(store: Store, principal: Principal, question: 
     : '';
   const run: Run = {
     id: runId, owner: principal.id, domain, conversationId, question, createdAt: new Date().toISOString(),
-    answer: result.accepted ? result.answer : 'Não foi possível validar uma resposta com as evidências disponíveis. Consulte as fontes ou reformule a pergunta.' + reviewReason,
+    answer: result.accepted ? result.answer : comparing ? 'Não consegui comprovar o confronto com trechos dos dois documentos. Selecione as fontes e especifique cláusula, artigo ou assunto para restringir a busca.' + reviewReason : 'Não foi possível validar uma resposta com as evidências disponíveis. Consulte as fontes ou reformule a pergunta.' + reviewReason,
     sources: result.sources, steps, mode: llm ? 'model' : 'extractive', review: result.review, workflow: 'document-answer-v1',
     status: abstained ? 'abstained' : 'completed', durationMs: Date.now() - start,
     model: llm ? config.LLM_MODEL : undefined, inputTokens: result.inputTokens, outputTokens: result.outputTokens
