@@ -7,6 +7,8 @@ const schema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   AUTH_MODE: z.enum(['local', 'native', 'oidc']).default('native'),
   LUMINA_ENCRYPTION_KEY: z.string().default(''),
+  IRIS_ADMIN_EMAIL: z.string().default(''),
+  IRIS_ADMIN_FIRST_PASSWORD: z.string().default(''),
   APP_ORIGIN: z.string().url().default('http://localhost:5173'),
   DATA_DIR: z.string().default('data/runtime'),
   DATABASE_URL: z.string().default(''),

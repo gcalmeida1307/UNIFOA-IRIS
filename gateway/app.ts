@@ -27,6 +27,8 @@ import { webRoutes } from './web-routes.js';
 import { workflows } from '../core/workflows/catalog.js';
 import { skills } from '../core/skills/catalog.js';
 import { evaluateRun } from '../core/llmops/evaluation.js';
+import { themesForRuns } from '../core/llmops/themes.js';
+import type { Run } from '../core/types.js';
 const querySchema = z.object({
   question: z.string().trim().min(2).max(4000),
   domain: z.string(),
@@ -60,6 +62,12 @@ export function createApp(store: Store) {
   if (config.AUTH_MODE === 'native') app.use('/api/auth', native.privateRoutes);
   app.get('/api/me', (req, res) => res.json({ ...req.principal, authMode: config.AUTH_MODE, user: req.authUser }));
   app.get('/api/domains', (req, res) => res.json(domains.filter(d => canRead(req.principal, d.id))));
+  app.get('/api/analytics/themes', globalAdmin, async (req, res) => {
+    const domain = z.string().parse(req.query.domain);
+    if (!canRead(req.principal, domain)) return void res.status(403).json({ error: 'Acesso negado ao domínio.' });
+    const rows = await store.sql('SELECT payload FROM runs WHERE domain=? AND created_at>=?', [domain, new Date(Date.now() - 30 * 86400000).toISOString()]);
+    res.json(themesForRuns(rows.map(row => JSON.parse(row.payload) as Run)));
+  });
   app.get('/api/research-jobs', async (req, res) => {
     const domain = z.string().parse(req.query.domain);
     if (!canRead(req.principal, domain)) return void res.status(403).json({ error: 'Acesso negado ao domínio.' });

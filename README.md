@@ -9,10 +9,13 @@ IRIS parte do código do [LUMINA](https://github.com/gcalmeida1307/mcp-lumina) p
 - Verificação adicional para perguntas com um assunto explícito: um trecho sem o assunto no título ou texto não entra só porque seu vetor é semelhante. Citações válidas permanecem junto das afirmações; uma citação inventada é removida e a revisão pode rejeitar a resposta.
 - Contagem de linhas e soma de colunas em XLSX/CSV por leitura do arquivo original completo. Consultas ambíguas pedem arquivo, aba ou coluna. Valores não numéricos são informados e ignorados na soma.
 - Consulta somente de leitura aos problemas de um host exato no Zabbix, restrita a usuários com acesso a `infraestrutura`, mediante `ZABBIX_API_URL` HTTPS e `ZABBIX_API_TOKEN`.
+- No modo `AUTH_MODE=native`, o fluxo de contas do SOFIA: solicitação na tela de entrada, aprovação exclusiva pela conta AG000001, ativação com senha e 2FA, recuperação de senha com token e visualização administrativa de temas repetidos e avaliações por módulo. O fluxo usa o banco configurado para o IRIS; nenhuma conta do SOFIA é migrada automaticamente.
 
 ## Executar
 
 Requer Node.js 24 ou superior. Copie `.env.example` para `.env`, configure o modelo e use `npm ci`, `npm test` e `npm run dev`. A geração por IA depende de um provedor configurado; sem ele, o sistema mostra trechos recuperados.
+
+Para criar contas no PostgreSQL do IRIS, configure `AUTH_MODE=native`, `LUMINA_ENCRYPTION_KEY` com 32 bytes hexadecimais, `IRIS_ADMIN_EMAIL` e `IRIS_ADMIN_FIRST_PASSWORD` forte no `.env`. Na primeira inicialização, a conta AG000001 é criada com troca obrigatória de senha e 2FA. Depois do primeiro acesso, remova a senha inicial do arquivo `.env` e reinicie; o administrador existente não é recriado. Solicitações precisam ser aprovadas pela AG000001, que entrega a matrícula e o token de ativação por um canal seguro. A chave de cifragem deve permanecer estável para permitir a leitura dos dados já gravados.
 
 ## Integração do SOFIA
 

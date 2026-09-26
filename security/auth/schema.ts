@@ -1,4 +1,7 @@
 import type { Store } from '../../data/storage/database.js';
+import { config } from '../../gateway/config.js';
+import { AuthService, GLOBAL_ADMIN_CODE } from './service.js';
+import { hashPassword } from './crypto.js';
 export async function initAuth(store: Store) {
   for (const sql of [
     "CREATE TABLE IF NOT EXISTS users (user_code TEXT PRIMARY KEY, email TEXT NOT NULL, email_lookup TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 0, two_factor_secret TEXT, two_factor_enabled INTEGER NOT NULL DEFAULT 0, password_changed_at TEXT, last_login_at TEXT, last_seen_at TEXT, blocked_at TEXT, blocked_reason TEXT, last_totp_step BIGINT NOT NULL DEFAULT -1)",
@@ -14,4 +17,14 @@ export async function initAuth(store: Store) {
     'CREATE INDEX IF NOT EXISTS idx_auth_requests_email ON access_requests(email_lookup,status)'
   ]) await store.sql(sql);
   await store.sql("INSERT INTO auth_settings(setting_key,setting_value,updated_at) VALUES ('inactive_lock_days','90',?) ON CONFLICT(setting_key) DO NOTHING", [new Date().toISOString()]);
+  if (config.AUTH_MODE === 'native' && !(await store.sql('SELECT 1 FROM users WHERE user_code=?', [GLOBAL_ADMIN_CODE])).length) {
+    if (!config.IRIS_ADMIN_EMAIL || !config.IRIS_ADMIN_FIRST_PASSWORD) {
+      throw new Error('Configure IRIS_ADMIN_EMAIL e IRIS_ADMIN_FIRST_PASSWORD no .env para criar a conta administradora AG000001.');
+    }
+    const passwordHash = await hashPassword(config.IRIS_ADMIN_FIRST_PASSWORD);
+    await store.transaction(async () => {
+      if ((await store.sql('SELECT 1 FROM users WHERE user_code=?', [GLOBAL_ADMIN_CODE])).length) return;
+      await new AuthService(store).createUser({ code: GLOBAL_ADMIN_CODE, email: config.IRIS_ADMIN_EMAIL, name: 'Administrador', role: 'admin', passwordHash, scopes: ['CORE'], mustChange: 1 });
+    });
+  }
 }
