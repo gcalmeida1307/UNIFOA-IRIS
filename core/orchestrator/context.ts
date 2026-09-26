@@ -13,7 +13,11 @@ export function boundedHistory(history: ConversationTurn[]): ConversationTurn[] 
   let remaining = MAX_CONTEXT_CHARS;
   for (const turn of history.filter(turn => !socialReply(turn.question)).slice(-MAX_HISTORY_TURNS).reverse()) {
     const question = sanitizeUntrustedText(turn.question).slice(0, 1500);
-    const answer = sanitizeUntrustedText(turn.answer).slice(0, MAX_ANSWER_CHARS);
+    const fullAnswer = sanitizeUntrustedText(turn.answer);
+    // A follow-up such as “continue” needs the final section as well as the topic.
+    const answer = fullAnswer.length > MAX_ANSWER_CHARS
+      ? fullAnswer.slice(0, 550) + '\n[trecho intermediário omitido]\n' + fullAnswer.slice(-550)
+      : fullAnswer;
     if (question.length + answer.length > remaining) break;
     selected.unshift({ question, answer }); remaining -= question.length + answer.length;
   }

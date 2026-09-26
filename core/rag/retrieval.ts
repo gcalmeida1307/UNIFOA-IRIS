@@ -88,11 +88,12 @@ export function rankCandidates(query: string, chunks: Chunk[], vector?: number[]
     return { chunk, score: eligible ? (top > 0 ? textScore + Math.max(0, semantic) * .08 : semantic) : 0 };
   }).filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.chunk.id.localeCompare(b.chunk.id));
 }
-export async function retrieve(store: Store, query: string, domain: string): Promise<Evidence[]> {
+export async function retrieve(store: Store, query: string, domain: string, documentIds?: readonly string[]): Promise<Evidence[]> {
   const revision = await store.revision(domain);
-  const key = 'lumina:retrieval:v3:' + createHash('sha256').update(JSON.stringify([store.cacheNamespace, domain, revision, query, config.KNOWLEDGE_ENABLED, config.EMBEDDING_MODEL, config.EMBEDDING_BASE_URL || config.LLM_BASE_URL, embeddingsEnabled()])).digest('hex');
+  const allowed = documentIds ? [...new Set(documentIds)].sort() : undefined;
+  const key = 'iris:retrieval:v4:' + createHash('sha256').update(JSON.stringify([store.cacheNamespace, domain, revision, query, allowed, config.KNOWLEDGE_ENABLED, config.EMBEDDING_MODEL, config.EMBEDDING_BASE_URL || config.LLM_BASE_URL, embeddingsEnabled()])).digest('hex');
   return cached(key, async () => {
-    const chunks = await store.chunks(domain);
+    const chunks = (await store.chunks(domain)).filter(chunk => !allowed || allowed.includes(chunk.documentId));
     if (!chunks.length) return [];
     const indexed = chunks.filter(c => c.vector && c.embeddingModel === config.EMBEDDING_MODEL);
     let vector: number[] | undefined;

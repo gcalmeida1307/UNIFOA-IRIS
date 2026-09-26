@@ -1,4 +1,7 @@
 import { extname } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -19,6 +22,8 @@ async function extractPdfWithOcr(buffer: Buffer) {
   const prefix = directory + '/page';
   const pdftoppm = process.env.LUMINA_PDFTOPPM_PATH || (process.platform === 'win32' ? 'pdftoppm.exe' : 'pdftoppm');
   const tesseract = process.env.LUMINA_TESSERACT_PATH || (process.platform === 'win32' ? 'tesseract.exe' : 'tesseract');
+  const bundledTessdata = resolve(dirname(fileURLToPath(import.meta.url)), '../../');
+  const tessdata = process.env.IRIS_TESSDATA_DIR || (existsSync(resolve(bundledTessdata, 'por.traineddata')) ? bundledTessdata : undefined);
   try {
     await writeFile(input, buffer);
     await run(pdftoppm, ['-r', '180', '-png', input, prefix], { windowsHide: true, maxBuffer: 1024 * 1024 });
@@ -26,7 +31,7 @@ async function extractPdfWithOcr(buffer: Buffer) {
     if (!files.length) throw new Error('O renderizador PDF não produziu páginas para OCR.');
     const pages: string[] = [];
     for (const file of files) {
-      const result = await run(tesseract, [directory + '/' + file, 'stdout', '-l', 'por'], { windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
+      const result = await run(tesseract, [directory + '/' + file, 'stdout', '-l', 'por', ...(tessdata ? ['--tessdata-dir', tessdata] : [])], { windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
       pages.push(result.stdout);
     }
     return { text: pages.map((text, index) => `\n\n[[LUMINA_PAGE:${index + 1}]]\n${text}`).join('\n'), pages: pages.map((text, index) => ({ page: index + 1, text })) };

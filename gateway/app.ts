@@ -11,11 +11,13 @@ import { config, generationEnabled, embeddingsEnabled } from './config.js';
 import { authenticate, admin, globalAdmin, canRead, canWrite, requireDomain } from '../security/policies/access.js';
 import { domains } from '../services/domains.js';
 import { integrationCatalog } from '../integrations/catalog.js';
+import { ZabbixReader } from '../integrations/zabbix.js';
 import { Store } from '../data/storage/database.js';
 import { Ingestion } from '../data/ingestion/pipeline.js';
 import { documentUploads } from './document-upload.js';
 import { MAX_UPLOAD_BATCH_BYTES } from '../core/ingestion-limits.js';
 import { orchestrate } from '../core/orchestrator/graph.js';
+import { ResearchJobs } from '../core/orchestrator/research-jobs.js';
 import { listServers, listTools, callTool, serverAllows } from '../core/mcp/registry.js';
 import { registry, requests, latency, traced, memoryDecisions } from '../observability/telemetry.js';
 import { nativeAuth, csrf, AuthError } from '../security/auth/routes.js';
@@ -30,6 +32,7 @@ const querySchema = z.object({
   domain: z.string(),
   agent: z.boolean().default(false),
   conversationId: z.string().uuid().optional(),
+  documentIds: z.array(z.string().uuid()).min(1).max(5).optional(),
   history: z.array(z.object({
     question: z.string().trim().min(1).max(4000),
     answer: z.string().trim().min(1).max(12000)
@@ -38,6 +41,7 @@ const querySchema = z.object({
 export function createApp(store: Store) {
   const app = express(), ingestion = new Ingestion(store);
   const webImports = new WebImports(store, ingestion);
+  const researchJobs = new ResearchJobs(store);
   const native = nativeAuth(store);
   app.disable('x-powered-by');
   app.use(helmet({ contentSecurityPolicy: { directives: { 'connect-src': ["'self'", ...(config.OIDC_ISSUER ? [new URL(config.OIDC_ISSUER).origin] : [])], 'style-src': ["'self'", "'unsafe-inline'"], 'upgrade-insecure-requests': config.NODE_ENV === 'production' ? [] : null } } }));
@@ -48,7 +52,7 @@ export function createApp(store: Store) {
     res.on('finish', () => { requests.inc({ method: req.method, route: req.route?.path ?? 'unmatched', status: String(res.statusCode) }); });
     next();
   });
-  app.get('/api/health', async (_req, res) => { await store.sql('SELECT 1'); res.json({ status: 'ok', service: 'lumina' }); });
+  app.get('/api/health', async (_req, res) => { await store.sql('SELECT 1'); res.json({ status: 'ok', service: 'iris' }); });
   app.get('/api/auth/config', (_req, res) => res.json({ mode: config.AUTH_MODE, authority: config.OIDC_ISSUER, clientId: config.OIDC_CLIENT_ID }));
   app.use('/api', csrf);
   if (config.AUTH_MODE === 'native') app.use('/api/auth', native.publicRoutes);
@@ -56,12 +60,45 @@ export function createApp(store: Store) {
   if (config.AUTH_MODE === 'native') app.use('/api/auth', native.privateRoutes);
   app.get('/api/me', (req, res) => res.json({ ...req.principal, authMode: config.AUTH_MODE, user: req.authUser }));
   app.get('/api/domains', (req, res) => res.json(domains.filter(d => canRead(req.principal, d.id))));
+  app.get('/api/research-jobs', async (req, res) => {
+    const domain = z.string().parse(req.query.domain);
+    if (!canRead(req.principal, domain)) return void res.status(403).json({ error: 'Acesso negado ao domínio.' });
+    res.json(await researchJobs.list(req.principal.id, domain));
+  });
+  app.post('/api/research-jobs', async (req, res) => {
+    const input = z.object({ question: z.string().trim().min(2).max(4000), domain: z.string(), documentIds: z.array(z.string().uuid()).min(1).max(20) }).parse(req.body);
+    if (!canRead(req.principal, input.domain)) return void res.status(403).json({ error: 'Acesso negado ao domínio.' });
+    if (!generationEnabled()) return void res.status(409).json({ error: 'Configure um modelo de geração, por exemplo Ollama local.' });
+    try { res.status(202).json(await researchJobs.start(req.principal.id, input.domain, input.question, input.documentIds)); }
+    catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : 'Não foi possível iniciar a pesquisa.' }); }
+  });
+  app.post('/api/research-jobs/:id/resume', async (req, res) => {
+    const domain = z.string().parse(req.body?.domain);
+    if (!canRead(req.principal, domain)) return void res.status(403).json({ error: 'Acesso negado ao domínio.' });
+    const job = await researchJobs.resume(String(req.params.id), req.principal.id, domain);
+    if (!job) return void res.status(404).json({ error: 'Pesquisa indisponível para retomada.' });
+    res.json(job);
+  });
+  app.post('/api/research-jobs/:id/cancel', async (req, res) => {
+    const domain = z.string().parse(req.body?.domain);
+    if (!canRead(req.principal, domain)) return void res.status(403).json({ error: 'Acesso negado ao domínio.' });
+    res.json({ ok: await researchJobs.cancel(String(req.params.id), req.principal.id, domain) });
+  });
+  app.get('/api/research-jobs/:id/result', async (req, res) => {
+    const domain = z.string().parse(req.query.domain);
+    if (!canRead(req.principal, domain)) return void res.status(403).json({ error: 'Acesso negado ao domínio.' });
+    const job = await researchJobs.get(String(req.params.id), req.principal.id, domain);
+    if (!job?.runId) return void res.status(404).json({ error: 'Resultado ainda indisponível.' });
+    const run = await store.run(job.runId);
+    if (!run || run.owner !== req.principal.id || run.domain !== domain) return void res.status(404).json({ error: 'Resultado não encontrado.' });
+    res.json(run);
+  });
   app.get('/api/workflows', (_req, res) => res.json(workflows));
   app.get('/api/skills', (_req, res) => res.json(skills));
   app.get('/api/status', async (req, res) => {
     const docs = (await store.documents()).filter(d => canRead(req.principal, d.domain));
     res.json({
-      name: 'LUMINA', version: '0.1.0', authMode: config.AUTH_MODE,
+      name: 'IRIS', version: '0.1.0', authMode: config.AUTH_MODE,
       generation: generationEnabled(), embeddings: embeddingsEnabled(),
       model: generationEnabled() ? config.LLM_MODEL : null,
       provider: config.LLM_PROVIDER,
@@ -146,7 +183,7 @@ export function createApp(store: Store) {
       const persistedHistory = input.conversationId
         ? (await store.conversationRuns(req.principal.id, input.domain, input.conversationId)).map(run => ({ question: run.question, answer: run.answer }))
         : [];
-      const run = await traced('lumina.query', () => orchestrate(store, req.principal, input.question, input.domain, input.agent, persistedHistory, input.conversationId, stream ? s => emit('step', s) : undefined));
+      const run = await traced('iris.query', () => orchestrate(store, req.principal, input.question, input.domain, input.agent, persistedHistory, input.conversationId, stream ? s => emit('step', s) : undefined, input.documentIds));
       if (stream) { emit('result', run); res.end(); } else res.json(run);
     } catch (error) {
       const message = 'A consulta não foi concluída. Verifique o provedor e tente novamente.';
@@ -179,7 +216,15 @@ export function createApp(store: Store) {
     if (!run || run.owner !== req.principal.id || !canRead(req.principal, run.domain)) return void res.status(404).json({ error: 'Execução não encontrada.' });
     run.feedback = value; await store.saveRun(run); await store.saveEvaluation(evaluateRun(run)); await store.audit(req.principal.id, 'query.feedback', run.id); res.json({ ok: true });
   });
-  app.get('/api/integrations', (req, res) => res.json({ catalog: integrationCatalog, servers: listServers().filter(s => s.domains.some(d => canRead(req.principal, d))) }));
+  app.get('/api/integrations', (req, res) => res.json({ catalog: integrationCatalog.map(item => item.id === 'zabbix' ? { ...item, status: config.ZABBIX_API_URL && config.ZABBIX_API_TOKEN ? 'configured' : 'not_configured' } : item), servers: listServers().filter(s => s.domains.some(d => canRead(req.principal, d))) }));
+  app.get('/api/integrations/zabbix/problems', async (req, res) => {
+    if (!canRead(req.principal, 'infraestrutura')) return void res.status(403).json({ error: 'Acesso negado ao domínio infraestrutura.' });
+    if (!config.ZABBIX_API_URL || !config.ZABBIX_API_TOKEN) return void res.status(409).json({ error: 'Configure a URL e o token de leitura do Zabbix.' });
+    const host = z.string().trim().min(1).max(128).parse(req.query.host);
+    const result = await new ZabbixReader(config.ZABBIX_API_URL, config.ZABBIX_API_TOKEN).problemsForHost(host);
+    await store.audit(req.principal.id, 'zabbix.problem.read', host);
+    res.json(result);
+  });
   app.get('/api/mcp/:id/tools', admin, async (req, res) => {
     const domain = requireDomain(req, res); if (!domain) return;
     if (!serverAllows(String(req.params.id), domain)) return void res.status(403).json({ error: 'Servidor não autorizado neste domínio.' });
@@ -208,5 +253,5 @@ export function createApp(store: Store) {
     console.error(JSON.stringify({ event: 'request.failed', requestId: req.requestId, type: error instanceof Error ? error.name : 'Error' }));
     res.status(500).json({ error: 'Falha ao processar a operação.', requestId: req.requestId });
   });
-  return { app, ingestion, webImports };
+  return { app, ingestion, webImports, researchJobs };
 }

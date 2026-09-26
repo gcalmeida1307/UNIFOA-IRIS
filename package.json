@@ -15,6 +15,7 @@
     "check": "tsc --noEmit",
     "benchmark:knowledge": "node --use-system-ca node_modules/tsx/dist/cli.mjs scripts/benchmark-knowledge.ts",
     "eval": "node --use-system-ca node_modules/tsx/dist/cli.mjs core/llmops/evaluate.ts",
+    "import:sofia": "node --import tsx scripts/import-sofia.ts",
     "start:lan": "node scripts/lan-server.mjs"
   },
   "dependencies": {

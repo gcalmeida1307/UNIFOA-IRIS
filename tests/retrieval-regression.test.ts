@@ -25,6 +25,22 @@ test('comparative evidence keeps both documents before filling the result limit'
   ], 3);
   assert.deepEqual(result.map(item => item.documentId), ['cct', 'vade', 'cct']);
 });
+test('related evidence covers three documents without admitting unrelated ones', () => {
+  const result = mergeEvidence([
+    [evidence('a-1', 'a', 1), evidence('a-2', 'a', .91), evidence('a-3', 'a', .84)],
+    [evidence('b-1', 'b', .63), evidence('c-1', 'c', .41), evidence('noise', 'unrelated', .02)]
+  ], 4);
+  assert.deepEqual(result.map(item => item.documentId), ['a', 'b', 'c', 'a']);
+});
+test('selected documents are filtered before ranking and use distinct cache entries', async t => {
+  const old = { EMBEDDING_MODEL: config.EMBEDDING_MODEL };
+  t.after(() => Object.assign(config, old)); config.EMBEDDING_MODEL = '';
+  const store = fakeStore();
+  const all = await retrieve(store, 'gripe', 'medicina');
+  const selected = await retrieve(store, 'gripe', 'medicina', ['groups']);
+  assert.ok(all.some(item => item.documentId === 'cid'));
+  assert.deepEqual(selected.map(item => item.documentId), ['groups']);
+});
 
 test('topic switch retrieves unembedded flu documents, not old fully embedded ethics', () => {
   const query = contextualizeQuestion('Você não consegue falar sobre a gripe?', history);

@@ -24,7 +24,13 @@ export class Ingestion {
     if (this.pending >= 30 || this.pendingBytes + content.length > 200 * 1024 * 1024) throw new Error('Fila cheia. Aguarde a conclusão dos documentos.');
     const hash = createHash('sha256').update(source?.sourceUrl ?? '').update(content).digest('hex');
     const prior = (await this.store.documents(domain)).find(d => d.hash === hash);
-    if (prior) return { document: prior, duplicate: true };
+    if (prior && prior.status !== 'failed') return { document: prior, duplicate: true };
+    // A transient extractor/OCR failure must not permanently prevent retrying
+    // the same file after the environment has been repaired.
+    if (prior?.status === 'failed') {
+      if (prior.objectKey) await deleteObject(prior.objectKey);
+      await this.store.deleteDocument(prior.id, domain);
+    }
     const document: DocumentRecord = {
       id: randomUUID(), name: repairMojibake(basename(name.replace(/\\/g, '/'))).slice(0, 180), domain, owner, hash,
       status: 'processing', createdAt: new Date().toISOString(), size: content.length, chunks: 0, stages: [], ...source

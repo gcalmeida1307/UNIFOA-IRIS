@@ -65,6 +65,7 @@ export class Store {
       'CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, domain TEXT NOT NULL, payload TEXT NOT NULL)',
       'CREATE INDEX IF NOT EXISTS chunks_domain ON chunks(domain)',
       'CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, domain TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)',
+      'CREATE INDEX IF NOT EXISTS runs_owner_domain_date ON runs(owner, domain, created_at)',
       'CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, created_at TEXT NOT NULL)',
       'CREATE TABLE IF NOT EXISTS run_reviews (run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)',
       'CREATE TABLE IF NOT EXISTS run_evaluations (run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)',
@@ -147,7 +148,10 @@ export class Store {
     return rows.map(r => JSON.parse(r.payload));
   }
   async conversationRuns(owner: string, domain: string, conversationId: string): Promise<Run[]> {
-    return (await this.runs(owner, domain))
+    // A busy workspace can have more than 100 recent runs in other conversations.
+    // Search this owner's domain history before applying the conversation limit.
+    const rows = await this.sql('SELECT payload FROM runs WHERE owner=? AND domain=? ORDER BY created_at DESC', [owner, domain]);
+    return rows.map(row => JSON.parse(row.payload) as Run)
       .filter(run => run.conversationId === conversationId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(-6);

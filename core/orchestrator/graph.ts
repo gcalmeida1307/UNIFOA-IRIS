@@ -13,6 +13,8 @@ import { canonicalizeConfusables, sanitizeUntrustedText } from '../../data/proce
 import { reviewAnswer } from '../llmops/review.js';
 import { evaluateRun } from '../llmops/evaluation.js';
 import { answerGroundedness, answerReviews } from '../../observability/telemetry.js';
+import { analyzeStructured, isStructuredQuestion } from '../structured/analysis.js';
+import { requestsExtendedWriting, writeExtended } from './longform.js';
 const needsStructuredAnalysis = (question: string) => /\b(compare|comparar|comparação|confront|relação|relacione|cruz|cruze|diferen[çc]a|diverg|converg|s[íi]ntese|resum|explique|detalh|risco|causa|consequ[êe]ncia|impacto|pontos? (em comum|distint)|entre .*document)/iu.test(question);
 const comparisonRequested = (question: string) => /\b(compare|comparar|comparação|confront|relação entre|relacione|cruz|cruze|diferen[çc]a|diverg|converg|pontos? (em comum|distint)|entre .*document)/iu.test(question);
 const State = Annotation.Root({
@@ -20,7 +22,7 @@ const State = Annotation.Root({
   citations: Annotation<number[]>(), accepted: Annotation<boolean>(), attempts: Annotation<number>(),
   findings: Annotation<ComparativeFinding[]>(), comparison: Annotation<boolean>(), abstain: Annotation<boolean>(), review: Annotation<RunReview | undefined>(), inputTokens: Annotation<number>(), outputTokens: Annotation<number>()
 });
-export async function orchestrate(store: Store, principal: Principal, question: string, domain: string, agent: boolean, history: ConversationTurn[] = [], conversationId?: string, onStep?: (step: TraceStep) => void): Promise<Run> {
+export async function orchestrate(store: Store, principal: Principal, question: string, domain: string, agent: boolean, history: ConversationTurn[] = [], conversationId?: string, onStep?: (step: TraceStep) => void, documentIds?: string[]): Promise<Run> {
   const start = Date.now(), runId = crypto.randomUUID(), steps: TraceStep[] = [];
   let tick = start;
   function step(name: string, detail: string) {
@@ -36,6 +38,34 @@ export async function orchestrate(store: Store, principal: Principal, question: 
     return run;
   }
   const normalizedQuestion = canonicalizeConfusables(sanitizeUntrustedText(question));
+  if (documentIds?.length) {
+    const available = new Set((await store.documents(domain)).filter(doc => doc.status === 'ready').map(doc => doc.id));
+    if (documentIds.some(id => !available.has(id))) throw new Error('Documento selecionado indisponível neste domínio.');
+  }
+  if (isStructuredQuestion(normalizedQuestion)) {
+    const outcome = await analyzeStructured(normalizedQuestion, (await store.documents(domain)).filter(doc => !documentIds || documentIds.includes(doc.id)));
+    step('Analisar planilha', outcome.detail);
+    const run: Run = {
+      id: runId, owner: principal.id, domain, conversationId, question, createdAt: new Date().toISOString(),
+      answer: outcome.answer, sources: outcome.document ? [{ id: outcome.document.id, documentId: outcome.document.id, title: outcome.document.name, text: outcome.detail, chunk: 1, score: 1 }] : [],
+      steps, mode: 'extractive', status: outcome.document && !/ambígu|ausente/i.test(outcome.detail) ? 'completed' : 'abstained', durationMs: Date.now() - start, inputTokens: 0, outputTokens: 0, workflow: 'structured-analysis-v1'
+    };
+    await store.saveRun(run); await store.audit(principal.id, 'query.' + run.status, run.id);
+    return run;
+  }
+  if (llm && requestsExtendedWriting(normalizedQuestion)) {
+    const result = await writeExtended(store, normalizedQuestion, domain, runId, documentIds);
+    step('Sintetizar', `Examinados ${result.examined}/${result.total} trechos de ${result.documents}/${result.totalDocuments} documentos. Seções validadas: ${result.reviews.filter(review => review.verdict === 'pass').length}.`);
+    const completed = result.reviews.some(review => review.verdict === 'pass');
+    const run: Run = {
+      id: runId, owner: principal.id, domain, conversationId, question, createdAt: new Date().toISOString(),
+      answer: result.answer, sources: result.sources, steps, mode: 'model',
+      status: completed ? 'completed' : 'abstained', workflow: 'extended-evidence-v1',
+      durationMs: Date.now() - start, model: config.LLM_MODEL, inputTokens: result.inputTokens, outputTokens: result.outputTokens
+    };
+    await store.saveRun(run); await store.saveEvaluation?.(evaluateRun(run)); await store.audit(principal.id, 'query.' + run.status, run.id);
+    return run;
+  }
   const correction = isAnswerCorrection(normalizedQuestion);
   const contextualQuery = contextualizeQuestion(normalizedQuestion, history);
   const conversationContext = conversationPrompt(history, normalizedQuestion);
@@ -51,8 +81,8 @@ export async function orchestrate(store: Store, principal: Principal, question: 
       return { queries, comparison: comparisonRequested(normalizedQuestion), inputTokens: p.inputTokens, outputTokens: p.outputTokens, attempts: 0 };
     })
     .addNode('retrieve', async state => {
-      const primary = await retrieve(store, state.queries[0], domain);
-      const batches = [primary, ...(await Promise.all(state.queries.slice(1).map(query => retrieve(store, query, domain))))];
+      const primary = await retrieve(store, state.queries[0], domain, documentIds);
+      const batches = [primary, ...(await Promise.all(state.queries.slice(1).map(query => retrieve(store, query, domain, documentIds))))];
       const sources = mergeEvidence(batches, 10);
       step('Recuperar', sources.length + ' trecho(s) de ' + new Set(sources.map(source => source.documentId)).size + ' documento(s) no domínio ' + domain + '. Consultas: ' + state.queries.length + '. Documentos: ' + [...new Set(sources.map(source => source.title))].join(' | '));
       return { sources };
@@ -69,7 +99,7 @@ export async function orchestrate(store: Store, principal: Principal, question: 
       const result = await generate([
         { role: 'system', content: answerInstructions },
         { role: 'user', content: JSON.stringify({ question: contextualQuery, userMessage: normalizedQuestion, feedbackMode: correction, conversation: conversationContext, researchMemory: memoryContext, sources: state.sources.map((s, i) => ({ citation: i + 1, documentId: s.documentId, document: s.title, passage: s.chunk, page: s.page, text: s.text })), retry: state.attempts > 0 ? 'A resposta anterior falhou na verificação de evidências. Use apenas afirmações diretamente sustentadas.' : undefined }) }
-      ], 4000);
+      ], config.IRIS_RESPONSE_MAX_TOKENS);
       const parsed = answerSchema.safeParse(result.data);
       step('Gerar', 'Resposta estruturada recebida; aguardando verificação.');
       const answer = parsed.success && parsed.data.citations.length

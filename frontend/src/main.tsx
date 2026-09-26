@@ -64,8 +64,10 @@ function App() {
   const [selectedDocument, setSelectedDocument] = useState<string>();
   const [search, setSearch] = useState('');
   const [question, setQuestion] = useState('');
+  const [researchSelection, setResearchSelection] = useState<string[]>([]);
+  const [researchJobs, setResearchJobs] = useState<Array<{ id: string; question: string; status: string; cursor: number; total: number; runId?: string; error?: string }>>([]);
   const [conversationId, setConversationId] = useState(() => {
-    try { return sessionStorage.getItem('lumina:conversation:geral') ?? newConversationId(); } catch { return newConversationId(); }
+    return newConversationId();
   });
   const [agent, setAgent] = useState(false);
   const [asking, setAsking] = useState(false);
@@ -119,19 +121,27 @@ function App() {
   useEffect(() => {
     if (!me || !domains.length) return;
     let nextConversation: string = newConversationId();
-    try { nextConversation = sessionStorage.getItem('lumina:conversation:' + domain) ?? nextConversation; } catch { /* storage is optional */ }
+    try {
+      const key = 'iris:conversation:' + me.id + ':' + domain;
+      nextConversation = localStorage.getItem(key) ?? nextConversation;
+      localStorage.setItem(key, nextConversation);
+    } catch { /* storage is optional */ }
     setConversationId(nextConversation);
     setChat([]); setSource(undefined); setSelectedDocument(undefined); setOfflineId(undefined);
     setMcpServer(''); setTools([]); setMcpResult('');
     void refresh(domain).catch(e => setError(e.message));
   }, [domain, me]);
   useEffect(() => {
-    try { sessionStorage.setItem('lumina:conversation:' + domain, conversationId); } catch { /* storage is optional */ }
-  }, [domain, conversationId]);
-  useEffect(() => {
     if (page !== 'chat') return;
     setChat(runs.filter(run => run.domain === domain && run.conversationId === conversationId).reverse());
   }, [page, domain, conversationId, runs]);
+  useEffect(() => {
+    if (!me || page !== 'chat') return;
+    let active = true;
+    const poll = () => { void api<typeof researchJobs>('/research-jobs?domain=' + encodeURIComponent(domain)).then(items => { if (active) setResearchJobs(items); }).catch(() => undefined); };
+    poll(); const timer = setInterval(poll, 5000);
+    return () => { active = false; clearInterval(timer); };
+  }, [me, page, domain]);
   useEffect(() => {
     if (!documents.some(d => d.status === 'processing')) return;
     const timer = setInterval(() => void refresh().catch(e => setError(e.message)), 1500);
@@ -260,11 +270,21 @@ function App() {
             return <div key={name} className={'timeline-step ' + (stage?.status ?? (active ? 'processing' : 'waiting'))}><span className="timeline-dot">{stage?.status === 'done' ? <Check size={15} /> : stage?.status === 'failed' ? <X size={15} /> : active ? <LoaderCircle size={15} className="spin" /> : <span>{i + 1}</span>}</span><div><strong>{name}</strong><p>{stage?.detail ?? (active ? 'Processando...' : 'Aguardando etapa anterior')}</p></div>{stage && <time>{new Date(stage.at).toLocaleTimeString('pt-BR')}</time>}</div>;
           })}</div>{selected.error && <div className="inline-alert"><AlertCircle size={17} />{selected.error}</div>}</section></div>}
         </>}
-        {page === 'chat' && <div className={'chat-layout ' + (source ? 'with-source' : '')}><section className="panel chat-panel"><div className="chat-top"><div><span className="lumina-mini"><Sparkles size={17} /></span><strong>IRIS</strong>{chat.length > 0 && <Pill tone="violet">Contexto restaurado</Pill>}</div><button className="text-button" disabled={asking} onClick={() => { const next = newConversationId(); setConversationId(next); setChat([]); setSource(undefined); }}>Nova conversa <Plus size={15} /></button></div><div className="chat-body">
+        {page === 'chat' && <div className={'chat-layout ' + (source ? 'with-source' : '')}><section className="panel chat-panel"><div className="chat-top"><div><span className="lumina-mini"><Sparkles size={17} /></span><strong>IRIS</strong>{chat.length > 0 && <Pill tone="violet">Contexto restaurado</Pill>}</div><button className="text-button" disabled={asking} onClick={() => { const next = newConversationId(); try { if (me) localStorage.setItem('iris:conversation:' + me.id + ':' + domain, next); } catch { /* storage is optional */ } setConversationId(next); setChat([]); setSource(undefined); }}>Nova conversa <Plus size={15} /></button></div><div className="chat-body">
           {!chat.length && !asking && <div className="chat-welcome"><div className="welcome-glyph"><Sparkles size={32} /></div><div className="eyebrow">SEU CONHECIMENTO, MAIS PRÓXIMO</div><h2>O que vamos descobrir?</h2><p>{ready ? 'Faça uma pergunta sobre os documentos deste domínio. Cada resposta começa pelas fontes.' : 'Adicione documentos neste domínio para começar. As respostas serão baseadas nas suas fontes.'}</p><div className="suggestions">{['Quais são os principais pontos dos documentos?', 'Que procedimentos estão descritos na base?', 'Quais informações sustentam essa decisão?'].map(q => <button key={q} onClick={() => setQuestion(q)}>{q}<ArrowUpRight size={15} /></button>)}</div>{!ready && <button className="text-button accent" disabled={!allowedWrite} onClick={() => setUploadOpen(true)}><Plus size={15} />Adicionar documento</button>}</div>}
           {chat.map((run, index) => <article className="exchange" key={run.id}><div className="user-message">{run.question}</div><div className="assistant-heading"><span className="lumina-mini"><Sparkles size={15} /></span><strong>IRIS</strong><span>{!run.sources.length && run.status === 'completed' ? 'Conversa' : run.mode === 'extractive' ? 'Trechos da sua base' : 'Resposta com evidências'}</span><button className="voice-action" aria-label={speakingId === run.id ? 'Parar leitura' : 'Ouvir resposta'} disabled={asking} onClick={() => speakAnswer(run)}>{speakingId === run.id ? <Square size={13} /> : <Volume2 size={15} />}</button></div><div className="answer">{run.answer}</div>{index === chat.length - 1 && <ResponseVisual key={'visual-' + run.id} answer={run.answer} />}{run.sources.length > 0 && <div className="sources"><span>FONTES CONSULTADAS</span><div>{run.sources.map((s, i) => <button key={s.id} onClick={() => setSource(s)}><span>{i + 1}</span><FileText size={13} />{s.title}<ArrowUpRight size={13} /></button>)}</div></div>}<div className="answer-footer"><span><Clock3 size={13} />{(run.durationMs / 1000).toFixed(1)} s · {run.steps.length} etapas</span><div><button className={'icon-button ' + (run.feedback === 1 ? 'chosen' : '')} aria-label="Resposta útil" onClick={() => void feedback(run, 1)}><ThumbsUp size={14} /></button><button className={'icon-button ' + (run.feedback === -1 ? 'chosen' : '')} aria-label="Resposta não foi útil" onClick={() => void feedback(run, -1)}><ThumbsDown size={14} /></button></div></div><details className="trace-details"><summary>Ver caminho da resposta</summary>{run.steps.map((s, i) => <p key={i}><CheckCircle2 size={13} /><strong>{s.name}</strong> {s.detail}</p>)}</details></article>)}
           {asking && <div className="thinking"><LoaderCircle size={18} className="spin" /><div><strong>Consultando suas fontes...</strong>{steps.map((s, i) => <p key={i}><Check size={13} />{s.name} · {s.detail}</p>)}</div></div>}<div ref={bottom} /></div>
           <VoiceExperience voice={voice} busy={asking} />
+          <details className="research-panel"><summary>Pesquisa integral em segundo plano</summary>
+            <p>Selecione documentos do domínio. O Ollama examina todos os trechos escolhidos em lotes e salva o progresso; o processo pode demorar bastante.</p>
+            <div className="research-documents">{documents.filter(item => item.status === 'ready').map(item => <label key={item.id}><input type="checkbox" checked={researchSelection.includes(item.id)} onChange={event => setResearchSelection(previous => event.target.checked ? [...previous, item.id] : previous.filter(id => id !== item.id))} />{item.name} · {item.chunks} trechos</label>)}</div>
+            <button type="button" className="button secondary" disabled={!status?.generation || !question.trim() || !researchSelection.length} onClick={() => void api('/research-jobs', { method: 'POST', body: JSON.stringify({ question, domain, documentIds: researchSelection }) }).then(() => { setNotice('Pesquisa iniciada. O progresso aparecerá aqui.'); setResearchSelection([]); }).catch(error => setError(error.message))}>Pesquisar documentos selecionados</button>
+            {researchJobs.map(job => <div className="research-job" key={job.id}><strong>{job.question}</strong><span>{job.status} · {job.cursor}/{job.total} trechos</span>{job.error && <small>{job.error}</small>}
+              {job.runId && <button type="button" className="button secondary" onClick={() => void api<Run>('/research-jobs/' + job.id + '/result?domain=' + encodeURIComponent(domain)).then(run => { setChat(previous => [...previous.filter(item => item.id !== run.id), run]); }).catch(error => setError(error.message))}>Ler resultado</button>}
+              {['paused', 'failed'].includes(job.status) && <button type="button" className="button secondary" onClick={() => void api('/research-jobs/' + job.id + '/resume', { method: 'POST', body: JSON.stringify({ domain }) }).catch(error => setError(error.message))}>Retomar</button>}
+              {['queued', 'running', 'paused'].includes(job.status) && <button type="button" className="button ghost" onClick={() => void api('/research-jobs/' + job.id + '/cancel', { method: 'POST', body: JSON.stringify({ domain }) }).catch(error => setError(error.message))}>Cancelar</button>}
+            </div>)}
+          </details>
           <form className="composer" onSubmit={submit}><textarea value={question} onChange={e => setQuestion(e.target.value)} placeholder={listening ? 'Estou ouvindo… fale agora' : 'Pergunte ao conhecimento da sua organização...'} aria-label="Sua pergunta" maxLength={4000} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submit(); } }} /><div className="composer-bottom"><label className={'agent-toggle ' + (agent ? 'enabled' : '')}><input type="checkbox" checked={agent} onChange={e => setAgent(e.target.checked)} /><GitBranch size={14} />Consulta com planejamento</label><span>{question.length}/4000</span><button className="voice-mode-button" type="button" aria-pressed={voice.active} disabled={asking && !voice.active} onClick={() => voice.active ? voice.stop() : voice.start()}><Mic size={17} />{voice.active ? 'Encerrar voz' : 'Conversar por voz'}</button><button className="send-button" type="submit" aria-label="Enviar pergunta" disabled={asking || question.trim().length < 2}>{asking ? <LoaderCircle size={17} className="spin" /> : <ArrowUp size={18} />}</button></div></form><p className="voice-disclosure">A conversa por voz usa o reconhecimento do navegador, que pode processar áudio online. A escuta pausa durante a resposta e encerra ao sair do chat.</p><div className="chat-disclaimer"><ShieldCheck size={12} />{listening ? 'Microfone ativo. Após uma pausa, envio sua pergunta e leio a resposta.' : status?.generation ? 'Confira as fontes. A verificação automática pode falhar.' : 'Sem modelo configurado, as consultas apresentam trechos literais da base.'}</div></section>
           {source && <aside className="panel source-panel"><div className="panel-heading"><h3>Fonte da resposta</h3><button className="icon-button" aria-label="Fechar fonte" onClick={() => setSource(undefined)}><X size={18} /></button></div><div className="source-content"><FileText size={26} /><h3>{source.title}</h3><Pill tone="violet">Trecho {source.chunk}{source.page ? ` · página ${source.page}` : ''}</Pill><p>{source.text}</p>{source.sourceUrl && <div className="web-origin"><a href={source.sourceUrl} target="_blank" rel="noopener noreferrer">Abrir página original</a>{source.capturedAt && <small>Capturada em {date(source.capturedAt)}</small>}<button className="text-button" onClick={() => setOfflineId(source.documentId)}>Ler cópia offline</button></div>}<small>ID de origem: {source.documentId}</small></div></aside>}</div>}
         {page === 'domains' && <><div className="inline-note"><ShieldCheck size={18} /><div><strong>Separação por contexto</strong><p>Cada módulo consulta sua própria base. As regras específicas serão definidas a partir das suas necessidades.</p></div></div><div className="domains-grid">{domains.map(d => { const Icon = iconMap[d.icon] ?? Boxes; return <button key={d.id} className={'panel domain-card ' + (domain === d.id ? 'selected' : '')} onClick={() => { setDomain(d.id); navigate('knowledge'); }}><span className="domain-icon" style={{ color: d.color, background: d.color + '16' }}><Icon size={24} /></span><ArrowUpRight size={17} className="card-arrow" /><h3>{d.name}</h3><p>{d.description}</p><div><span className="live-dot" />Base independente<span>Abrir módulo <ArrowRight size={13} /></span></div></button>; })}</div></>}

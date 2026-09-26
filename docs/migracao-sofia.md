@@ -3,9 +3,9 @@
 | Capacidade | Estado no IRIS | Próximo trabalho verificável |
 | --- | --- | --- |
 | Direito, medicina e infraestrutura | Módulos já existem na base LUMINA | Inventariar documentos do SOFIA, direitos de uso e versões; importar por domínio, testar consultas com página correta. |
-| OCR, PDF e XLSX | Extração existente no LUMINA | Testar o Vade Mecum integral e planilhas reais; contagem e cálculo devem operar sobre todas as linhas, nunca sobre amostras de RAG. |
+| OCR, PDF e XLSX | Extração existente no LUMINA; contagem e soma integrais adicionadas | Testar o Vade Mecum integral e planilhas reais com várias abas, datas e fórmulas. |
 | Políticas de acesso | Escopos por domínio existentes | Comparar com políticas do SOFIA; negar consulta cruzada e auditar antes de integrar fontes internas. |
-| Zabbix e RCA | Ainda não migrados | Adaptador de leitura com contrato de evidência, testes com alertas reais e ações externas explicitamente autorizadas. |
+| Zabbix e RCA | Consulta de problemas por host exato adicionada; RCA ainda pendente | Configurar credencial apenas de leitura, testar com alertas reais e cruzar métricas antes de sugerir causa. |
 | Provedores e MCP | Adaptadores no LUMINA | Migrar apenas capacidades necessárias, uma por vez, medindo cobertura, custo e latência. |
 
 ## Contrato de evidência

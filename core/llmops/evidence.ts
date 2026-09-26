@@ -9,7 +9,7 @@ export const comparativeFindingSchema = z.object({
   conclusion: z.string().min(1).max(1500)
 });
 export const answerSchema = z.object({
-  answer: z.string().min(1).max(20000),
+  answer: z.string().min(1).max(120000),
   citations: z.array(z.coerce.number().int().positive()).max(10),
   abstain: z.boolean(),
   findings: z.array(comparativeFindingSchema).max(12).default([])

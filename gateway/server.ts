@@ -16,15 +16,15 @@ catch (error) {
 }
 await initAuth(store);
 await initObjects(); await initCache();
-const { app, ingestion, webImports } = createApp(store);
+const { app, ingestion, webImports, researchJobs } = createApp(store);
 void ingestion.resumeEmbeddings().catch(() => console.warn('Não foi possível retomar a indexação vetorial. A busca textual continua disponível.'));
 const server = app.listen(config.PORT, config.HOST, () => {
-  console.log('LUMINA disponível em http://' + config.HOST + ':' + config.PORT);
+  console.log('IRIS disponível em http://' + config.HOST + ':' + config.PORT);
   console.log(config.AUTH_MODE === 'local' ? 'Modo local de desenvolvimento, sem autenticação. Não exponha à rede.' : 'Autenticação ' + config.AUTH_MODE + ' ativa · ' + store.storageName);
 });
 let closing = false;
 async function shutdown() {
   if (closing) return; closing = true;
-  server.close(async () => { await webImports.close(); await ingestion.idle(); await closeCache(); await stopTelemetry(); await store.close(); process.exit(0); });
+  server.close(async () => { await researchJobs.close(); await webImports.close(); await ingestion.idle(); await closeCache(); await stopTelemetry(); await store.close(); process.exit(0); });
 }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { contextualizeQuestion, conversationPrompt, isAnswerCorrection, relevantMemories } from '../core/orchestrator/context.js';
+import { boundedHistory, contextualizeQuestion, conversationPrompt, isAnswerCorrection, relevantMemories } from '../core/orchestrator/context.js';
 import type { ResearchMemory } from '../core/types.js';
 
 test('expands a follow-up with the previous subject', () => {
@@ -15,6 +15,13 @@ test('expands a follow-up with the previous subject', () => {
 test('does not invent context for a first question', () => {
   assert.equal(contextualizeQuestion('Quais contratos estão ativos?', []), 'Quais contratos estão ativos?');
   assert.equal(conversationPrompt([]), 'Nenhum turno anterior.');
+});
+test('long answers retain the opening and ending for a continued conversation', () => {
+  const answer = 'Introdução fundamentada. ' + 'parte intermediária '.repeat(100) + 'Conclusão e lacunas.';
+  const [turn] = boundedHistory([{ question: 'Resuma os textos', answer }]);
+  assert.match(turn.answer, /Introdução fundamentada/);
+  assert.match(turn.answer, /Conclusão e lacunas/);
+  assert.ok(turn.answer.length < 1200);
 });
 
 test('independent questions do not inherit earlier subjects or generated answer terms', () => {
